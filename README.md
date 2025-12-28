@@ -80,8 +80,7 @@ PROXY_HOST="192.168.49.1"
 PROXY_PORT="8282"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}/"
 
-TARGET_NM_CONN="MyNetShareWifi"
-# TARGET_SSID="MyPhoneHotspot"
+TARGET_NM_CONN="DIRECT-NS-smcwifi"   # nmcli connection name (권장)
 
 APT_PROXY_FILE="/etc/apt/apt.conf.d/99proxy"
 APT_PROXY_BAK="/etc/apt/apt.conf.d/99proxy.disabled"
