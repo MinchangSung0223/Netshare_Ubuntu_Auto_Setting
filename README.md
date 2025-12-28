@@ -175,14 +175,27 @@ main "$@"
 ```bash
 sudo tee /etc/NetworkManager/dispatcher.d/90-netshare-proxy >/dev/null <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+
 SCRIPT="/usr/local/sbin/netshare-proxy.sh"
 
-case "$2" in
-  up|down|dhcp4-change|connectivity-change|vpn-up|vpn-down)
+# NetworkManager dispatcher args:
+# $1: interface name (e.g., wlp0s20f3)
+# $2: action (up|down|pre-up|vpn-up|vpn-down|dhcp4-change|connectivity-change|...)
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+case "$ACTION" in
+  up|down|dhcp4-change|dhcp6-change|connectivity-change|vpn-up|vpn-down)
+    # auto 모드로 실행: 특정 네트워크면 on, 아니면 off
     "$SCRIPT" auto || true
+    ;;
+  *)
+    # ignore other events
     ;;
 esac
 EOF
+
 ```
 
 권한 부여:
