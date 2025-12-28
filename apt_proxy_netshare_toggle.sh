@@ -8,19 +8,28 @@ PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}/"
 
 APT_PROXY_FILE="/etc/apt/apt.conf.d/99proxy"
 APT_PROXY_BAK="/etc/apt/apt.conf.d/99proxy.disabled"
+TARGET_NM_CONN="DIRECT-NS-smcwifi"   # nmcli connection name (권장)
+# 또는 SSID 기준으로 하고 싶으면 아래처럼
 
 # ----- NetShare detection -----
 is_netshare() {
-  local gw
-  gw="$(ip route | awk '/^default/ {print $3; exit}' || true)"
-  [[ "$gw" == "$PROXY_HOST" ]] || return 1
+  # 1) NetworkManager connection name 기준 (가장 안정적)
+  if command -v nmcli >/dev/null 2>&1; then
+    local active
+    active="$(nmcli -t -f NAME,TYPE connection show --active | awk -F: '$2=="wifi" || $2=="ethernet" {print $1; exit}' || true)"
+    [[ -n "${TARGET_NM_CONN:-}" && "$active" == "$TARGET_NM_CONN" ]] && return 0
 
-  if command -v nc >/dev/null 2>&1; then
-    nc -z -w 1 "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1
-  else
-    (echo >/dev/tcp/"$PROXY_HOST"/"$PROXY_PORT") >/dev/null 2>&1
+    # 2) SSID 기준 (원하면)
+    if [[ -n "${TARGET_SSID:-}" ]]; then
+      local ssid
+      ssid="$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true)"
+      [[ "$ssid" == "$TARGET_SSID" ]] && return 0
+    fi
   fi
+
+  return 1
 }
+
 
 # ----- APT proxy (root) -----
 enable_apt_proxy() {
@@ -163,4 +172,3 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 main "$@"
-
