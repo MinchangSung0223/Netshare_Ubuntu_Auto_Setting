@@ -1,35 +1,35 @@
-# NetShare Proxy Auto Switch (Ubuntu + GNOME + APT)
+# NetShare Proxy Auto Switch (Ubuntu + GNOME + APT + pip)
 
 특정 네트워크(NetShare / 핫스팟 등)에 **연결되었을 때만 프록시를 자동 활성화**하고,
 그 외 네트워크에서는 **자동으로 프록시를 비활성화**하는 스크립트이다.
 
-지원 범위:
+이 버전은 다음 사항을 모두 반영한다:
 
-* APT (`/etc/apt/apt.conf.d`)
-* GNOME System Proxy (gsettings)
-* NetworkManager 기반 자동 트리거
+* NetworkManager **dispatcher 기반 자동 실행**
+* **인터페이스 기반** NetShare 판별 (auto가 off로 떨어지는 문제 해결)
+* APT / GNOME System Proxy / **pip·curl·git용 환경변수**까지 on/off 동기화
 
 ---
 
 ## 1. 개요
 
-동작 방식 요약:
+동작 흐름 요약:
 
-* NetworkManager 네트워크 변경 이벤트 감지
-* **지정한 네트워크(SSID 또는 connection name)** 일 때만:
+1. NetworkManager가 네트워크 변경 이벤트 발생
+2. dispatcher가 `netshare-proxy.sh auto <iface>` 호출
+3. 스크립트가 **해당 인터페이스의 active connection name**을 기준으로 NetShare 여부 판단
+4. NetShare 네트워크일 때만:
 
-  * APT proxy 활성화
-  * GNOME proxy 활성화
-* 다른 네트워크로 변경되면:
-
-  * APT proxy 비활성화
-  * GNOME proxy 비활성화
+   * APT proxy 활성화
+   * GNOME proxy 활성화
+   * `/etc/profile.d` 기반 ENV proxy 활성화 (pip/curl/git)
+5. 그 외 네트워크에서는 위 설정을 모두 비활성화
 
 ---
 
 ## 2. 설치 위치
 
-스크립트는 root 권한이 필요하므로 `/usr/local/sbin`에 설치하는 것을 권장한다.
+스크립트는 root 권한이 필요하므로 `/usr/local/sbin`에 설치한다.
 
 ```bash
 sudo install -m 0755 netshare-proxy.sh /usr/local/sbin/netshare-proxy.sh
@@ -37,37 +37,35 @@ sudo install -m 0755 netshare-proxy.sh /usr/local/sbin/netshare-proxy.sh
 
 ---
 
-## 3. NetShare 대상 네트워크 설정
+## 3. NetShare 대상 네트워크 설정 (중요)
 
-스크립트 상단에서 **아래 중 하나만 설정하면 됨**.
+### 3.1 NetworkManager connection name 기준 (권장)
 
-### (권장) NetworkManager connection name 기준
+`netshare-proxy.sh` 상단에서 아래 값을 **실제 connection name과 정확히 일치**하게 설정해야 한다.
 
 ```bash
-TARGET_NM_CONN="MyNetShareWifi"
+TARGET_NM_CONN="DIRECT-NS-smcwifi"
 ```
 
 확인 방법:
 
 ```bash
-nmcli connection show
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status
 ```
 
-### (대안) Wi-Fi SSID 기준
+출력 예:
 
-```bash
-TARGET_SSID="MyPhoneHotspot"
+```
+wlp0s20f3:wifi:connected:DIRECT-NS-smcwifi
 ```
 
-확인 방법:
+이때 마지막 필드가 connection name이다.
 
-```bash
-nmcli dev wifi list
-```
+> ⚠️ 이름이 다르면 `auto` 모드에서 항상 disable됨
 
 ---
 
-## 4. 프록시 스크립트 본문
+## 4. 프록시 스크립트 (`netshare-proxy.sh`)
 
 > 📌 `/usr/local/sbin/netshare-proxy.sh`
 
@@ -80,26 +78,33 @@ PROXY_HOST="192.168.49.1"
 PROXY_PORT="8282"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}/"
 
-TARGET_NM_CONN="DIRECT-NS-smcwifi"   # nmcli connection name (권장)
-
 APT_PROXY_FILE="/etc/apt/apt.conf.d/99proxy"
 APT_PROXY_BAK="/etc/apt/apt.conf.d/99proxy.disabled"
 
-# ----- NetShare detection -----
+# Global env proxy (pip / curl / git) - new shells only
+ENV_PROXY_FILE="/etc/profile.d/99proxy.sh"
+ENV_PROXY_BAK="/etc/profile.d/99proxy.sh.disabled"
+
+TARGET_NM_CONN="DIRECT-NS-smcwifi"
+
+# ----- NetShare detection (interface-based, reliable) -----
 is_netshare() {
+  local iface="${1:-}"
+
+  if command -v nmcli >/dev/null 2>&1 && [[ -n "$iface" ]]; then
+    local conn
+    conn="$(nmcli -g GENERAL.CONNECTION dev show "$iface" 2>/dev/null | head -n 1 || true)"
+    [[ -n "$conn" && "$conn" != "--" && "$conn" == "$TARGET_NM_CONN" ]] && return 0
+    return 1
+  fi
+
+  # Fallback (manual run without iface)
   if command -v nmcli >/dev/null 2>&1; then
     local active
-    active="$(nmcli -t -f NAME,TYPE connection show --active | \
-      awk -F: '$2=="wifi" || $2=="ethernet"{print $1; exit}' || true)"
-
-    [[ -n "${TARGET_NM_CONN:-}" && "$active" == "$TARGET_NM_CONN" ]] && return 0
-
-    if [[ -n "${TARGET_SSID:-}" ]]; then
-      local ssid
-      ssid="$(nmcli -t -f active,ssid dev wifi | awk -F: '$1=="yes"{print $2; exit}' || true)"
-      [[ "$ssid" == "$TARGET_SSID" ]] && return 0
-    fi
+    active="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n 1 || true)"
+    [[ "$active" == "$TARGET_NM_CONN" ]] && return 0
   fi
+
   return 1
 }
 
@@ -116,6 +121,23 @@ disable_apt_proxy() {
   [[ -f "$APT_PROXY_FILE" ]] && mv -f "$APT_PROXY_FILE" "$APT_PROXY_BAK"
 }
 
+# ----- ENV proxy (pip / curl / git) -----
+enable_env_proxy() {
+  cat > "$ENV_PROXY_FILE" <<EOF
+export http_proxy="${PROXY_URL}"
+export https_proxy="${PROXY_URL}"
+export HTTP_PROXY="${PROXY_URL}"
+export HTTPS_PROXY="${PROXY_URL}"
+export no_proxy="localhost,127.0.0.1,::1"
+export NO_PROXY="\$no_proxy"
+EOF
+  chmod 0644 "$ENV_PROXY_FILE"
+}
+
+disable_env_proxy() {
+  [[ -f "$ENV_PROXY_FILE" ]] && mv -f "$ENV_PROXY_FILE" "$ENV_PROXY_BAK"
+}
+
 # ----- GNOME proxy -----
 get_login_user() {
   [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] && echo "$SUDO_USER" && return
@@ -124,8 +146,7 @@ get_login_user() {
 
 run_gsettings_as_user() {
   local u="$1"; shift
-  local uid
-  uid="$(id -u "$u")"
+  local uid; uid="$(id -u "$u")"
   runuser -u "$u" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" "$@"
 }
 
@@ -145,20 +166,30 @@ disable_gnome_proxy() {
   run_gsettings_as_user "$u" gsettings set org.gnome.system.proxy mode none
 }
 
+apply_on() {
+  enable_apt_proxy
+  enable_env_proxy
+  enable_gnome_proxy
+}
+
+apply_off() {
+  disable_apt_proxy
+  disable_env_proxy
+  disable_gnome_proxy
+}
+
 main() {
   case "${1:-auto}" in
     auto)
-      if is_netshare; then
-        enable_apt_proxy
-        enable_gnome_proxy
+      if is_netshare "${2:-}"; then
+        apply_on
       else
-        disable_apt_proxy
-        disable_gnome_proxy
+        apply_off
       fi
       ;;
-    on)  enable_apt_proxy; enable_gnome_proxy ;;
-    off) disable_apt_proxy; disable_gnome_proxy ;;
-    *) echo "Usage: $0 [auto|on|off]" ;;
+    on)  apply_on ;;
+    off) apply_off ;;
+    *) echo "Usage: $0 [auto|on|off] [iface]" ;;
   esac
 }
 
@@ -168,9 +199,7 @@ main "$@"
 
 ---
 
-## 5. NetworkManager 자동 트리거 설정
-
-네트워크 상태가 변경될 때마다 자동 실행되도록 dispatcher를 등록한다.
+## 5. NetworkManager dispatcher 설정 (자동 실행 핵심)
 
 ```bash
 sudo tee /etc/NetworkManager/dispatcher.d/90-netshare-proxy >/dev/null <<'EOF'
@@ -178,71 +207,53 @@ sudo tee /etc/NetworkManager/dispatcher.d/90-netshare-proxy >/dev/null <<'EOF'
 set -euo pipefail
 
 SCRIPT="/usr/local/sbin/netshare-proxy.sh"
-
-# NetworkManager dispatcher args:
-# $1: interface name (e.g., wlp0s20f3)
-# $2: action (up|down|pre-up|vpn-up|vpn-down|dhcp4-change|connectivity-change|...)
 IFACE="${1:-}"
 ACTION="${2:-}"
 
 case "$ACTION" in
   up|down|dhcp4-change|dhcp6-change|connectivity-change|vpn-up|vpn-down)
-    # auto 모드로 실행: 특정 네트워크면 on, 아니면 off
-    "$SCRIPT" auto || true
-    ;;
-  *)
-    # ignore other events
+    "$SCRIPT" auto "$IFACE" || true
     ;;
 esac
 EOF
 
-```
-
-권한 부여:
-
-```bash
 sudo chmod 0755 /etc/NetworkManager/dispatcher.d/90-netshare-proxy
-```
-
-NetworkManager 재시작:
-
-```bash
 sudo systemctl restart NetworkManager
 ```
 
 ---
 
-## 6. 상태 확인
+## 6. 확인 방법
+
+강제 적용:
 
 ```bash
-sudo /usr/local/sbin/netshare-proxy.sh auto
-sudo /usr/local/sbin/netshare-proxy.sh off
-sudo /usr/local/sbin/netshare-proxy.sh on
+sudo netshare-proxy.sh auto
 ```
 
-APT 설정 확인:
+현재 연결 확인:
 
 ```bash
-cat /etc/apt/apt.conf.d/99proxy*
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status
 ```
 
-GNOME proxy 확인:
+pip 테스트 (새 터미널에서):
 
 ```bash
-gsettings get org.gnome.system.proxy mode
+pip install --user streamlit pandas
 ```
 
 ---
 
 ## 7. 주의 사항
 
-* GNOME proxy 설정은 **로그인된 사용자 세션(DBus)** 이 있어야 적용됨
-* 로그인 이전에는 APT proxy만 적용될 수 있음 (정상 동작)
-* 단일 사용자 데스크톱 환경 기준으로 설계됨
+* `/etc/profile.d` 기반 ENV proxy는 **새로 열린 쉘부터 적용됨**
+* auto 모드에서 항상 off가 되면 **connection name 불일치**를 가장 먼저 의심할 것
+* GNOME proxy는 로그인된 사용자 세션이 있어야 적용됨
 
 ---
 
-## 8. 라이선스 / 사용
+## 8. 사용 목적
 
-* 개인 개발용 / 연구용 환경에서 자유 사용
-* NetShare, 핫스팟, 사내 프록시 환경 전환 자동화 목적
+* NetShare / 핫스팟 환경에서 APT, pip, curl, git DNS 문제 자동 해결
+* 연구·개발용 Ubuntu 데스크톱 환경 네트워크 자동 전환
